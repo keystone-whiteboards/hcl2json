@@ -56,6 +56,14 @@ Prebuilt binaries are available on the [releases page](https://github.com/tmccom
 
 Alternatively you can build from source (see next section).
 
+### Using mise
+
+On Linux/MacOS/Windows if you are using [mise-en-place](https://github.com/jdx/mise), the polyglot tool version manager you can install hcl2json with a command like:
+
+```shell
+mise use -g hcl2json@latest
+```
+
 ## Building
 
 You can build and install `hcl2json` using `go get`. Since `hcl2json` uses Go modules, you will need to run this as
