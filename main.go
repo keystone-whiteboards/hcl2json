@@ -8,11 +8,12 @@ import (
 	"io"
 	"log"
 	"os"
+	"runtime/debug"
 
 	"github.com/tmccombs/hcl2json/convert"
 )
 
-var version string = "devel"
+var version string = ""
 
 const versionUsage = "Print the version of hcl2json"
 
@@ -28,6 +29,17 @@ func main() {
 	flag.Parse()
 
 	if printVersion {
+		if version == "" {
+			//If version wasn't set at build time, try to descern it with
+			// debug info
+			if info, ok := debug.ReadBuildInfo(); ok {
+				version = info.Main.Version
+			}
+			// If we still have an empty version, use a placeholder
+			if version == "" {
+				version = "devel"
+			}
+		}
 		fmt.Println(version)
 		os.Exit(0)
 	}
