@@ -74,22 +74,25 @@ func ConvertFile(file *hcl.File, options Options) (jsonObj, error) {
 }
 
 func (c *converter) ConvertBody(body *hclsyntax.Body) (jsonObj, error) {
-	out := make(jsonObj)
-
+	blocks := make(jsonObj)
 	for _, block := range body.Blocks {
-		if err := c.convertBlock(block, out); err != nil {
+		if err := c.convertBlock(block, blocks); err != nil {
 			return nil, fmt.Errorf("convert block: %w", err)
 		}
 	}
 
+	attrs := make(jsonObj)
 	var err error
 	for key, value := range body.Attributes {
-		out[key], err = c.ConvertExpression(value.Expr)
+		attrs[key], err = c.ConvertExpression(value.Expr)
 		if err != nil {
 			return nil, fmt.Errorf("convert expression: %w", err)
 		}
 	}
 
+	out := make(jsonObj)
+	out["blocks"] = blocks
+	out["attributes"] = attrs
 	return out, nil
 }
 
@@ -105,39 +108,12 @@ func (c *converter) rangeSource(r hcl.Range) string {
 
 func (c *converter) convertBlock(block *hclsyntax.Block, out jsonObj) error {
 	key := block.Type
-	for _, label := range block.Labels {
-
-		// Labels represented in HCL are defined as quoted strings after the name of the block:
-		// block "label_one" "label_two"
-		//
-		// Labels represtend in JSON are nested one after the other:
-		// "label_one": {
-		//   "label_two": {}
-		// }
-		//
-		// To create the JSON representation, check to see if the label exists in the current output:
-		//
-		// When the label exists, move onto the next label reference.
-		// When a label does not exist, create the label in the output and set that as the next label reference
-		// in order to append (potential) labels to it.
-		if _, exists := out[key]; exists {
-			var ok bool
-			out, ok = out[key].(jsonObj)
-			if !ok {
-				return fmt.Errorf("Unable to convert Block to JSON: %v.%v", block.Type, strings.Join(block.Labels, "."))
-			}
-		} else {
-			out[key] = make(jsonObj)
-			out = out[key].(jsonObj)
-		}
-
-		key = label
-	}
 
 	value, err := c.ConvertBody(block.Body)
 	if err != nil {
 		return fmt.Errorf("convert body: %w", err)
 	}
+	value["labels"] = block.Labels
 
 	// Multiple blocks can exist with the same name, at the same
 	// level in the JSON document (e.g. locals).
