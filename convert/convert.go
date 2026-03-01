@@ -8,12 +8,10 @@ import (
 	hcl "github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/zclconf/go-cty/cty"
-	ctyconvert "github.com/zclconf/go-cty/cty/convert"
 	ctyjson "github.com/zclconf/go-cty/cty/json"
 )
 
 type Options struct {
-	Simplify bool
 }
 
 // Bytes takes the contents of an HCL file, as bytes, and converts
@@ -136,23 +134,55 @@ func (c *converter) convertBlock(block *hclsyntax.Block, out jsonObj) error {
 }
 
 func (c *converter) ConvertExpression(expr hclsyntax.Expression) (interface{}, error) {
-	if c.options.Simplify {
-		value, err := expr.Value(&evalContext)
-		if err == nil {
-			return ctyjson.SimpleJSONValue{Value: value}, nil
-		}
-	}
-
 	// assume it is hcl syntax (because, um, it is)
 	switch value := expr.(type) {
 	case *hclsyntax.LiteralValueExpr:
-		return ctyjson.SimpleJSONValue{Value: value.Val}, nil
+		n := make(jsonObj)
+		n["$type"] = "literal"
+		n["value"] = ctyjson.SimpleJSONValue{Value: value.Val}
+		return n, nil
 	case *hclsyntax.UnaryOpExpr:
-		return c.convertUnary(value)
+		n := make(jsonObj)
+		n["$type"] = "unary"
+		n["op"] = c.rangeSource(value.SymbolRange)
+		arg, err := c.ConvertExpression(value.Val)
+		if err != nil {
+			return nil, fmt.Errorf("convert unary arg: %w", err)
+		}
+		n["arg"] = arg
+		return n, nil
 	case *hclsyntax.TemplateExpr:
-		return c.convertTemplate(value)
+		if value.IsStringLiteral() {
+			// safe because the value is just the string
+			v, err := value.Value(nil)
+			if err != nil {
+				return "", err
+			}
+			return c.ConvertExpression(&hclsyntax.LiteralValueExpr{Val: v, SrcRange: value.SrcRange})
+		}
+		n := make(jsonObj)
+		n["$type"] = "template"
+		var parts []interface{}
+		for _, part := range value.Parts {
+			s, err := c.ConvertExpression(part)
+			if err != nil {
+				return nil, err
+			}
+			parts = append(parts, s)
+		}
+		n["parts"] = parts
+		return n, nil
 	case *hclsyntax.TemplateWrapExpr:
 		return c.ConvertExpression(value.Wrapped)
+	case *hclsyntax.TemplateJoinExpr:
+		n := make(jsonObj)
+		n["$type"] = "template-join"
+		expr, err := c.ConvertExpression(value.Tuple)
+		if err != nil {
+			return nil, fmt.Errorf("convert template join tuple: %w", err)
+		}
+		n["expr"] = expr
+		return n, nil
 	case *hclsyntax.TupleConsExpr:
 		list := make([]interface{}, 0)
 		for _, ex := range value.Exprs {
@@ -164,145 +194,195 @@ func (c *converter) ConvertExpression(expr hclsyntax.Expression) (interface{}, e
 		}
 		return list, nil
 	case *hclsyntax.ObjectConsExpr:
-		m := make(jsonObj)
+		n := make(jsonObj)
+		n["$type"] = "object"
+		var props []jsonObj
 		for _, item := range value.Items {
-			key, err := c.convertKey(item.KeyExpr)
+			keyExpr := item.KeyExpr.(*hclsyntax.ObjectConsKeyExpr)
+			wrappedExpr := keyExpr.Wrapped
+			if _, isTraversal := wrappedExpr.(*hclsyntax.ScopeTraversalExpr); isTraversal && !keyExpr.ForceNonLiteral {
+				wrappedExpr = &hclsyntax.LiteralValueExpr{Val: cty.StringVal(c.rangeSource(wrappedExpr.Range())), SrcRange: wrappedExpr.Range()}
+			}
+			key, err := c.ConvertExpression(wrappedExpr)
 			if err != nil {
 				return nil, err
 			}
-			m[key], err = c.ConvertExpression(item.ValueExpr)
+			value, err := c.ConvertExpression(item.ValueExpr)
 			if err != nil {
 				return nil, err
 			}
-		}
-		return m, nil
-	default:
-		return c.wrapExpr(expr), nil
-	}
-}
 
-func (c *converter) convertUnary(v *hclsyntax.UnaryOpExpr) (interface{}, error) {
-	_, isLiteral := v.Val.(*hclsyntax.LiteralValueExpr)
-	if !isLiteral {
-		// If the expression after the operator isn't a literal, fall back to
-		// wrapping the expression with ${...}
-		return c.wrapExpr(v), nil
-	}
-	val, err := v.Value(nil)
-	if err != nil {
-		return nil, err
-	}
-	return ctyjson.SimpleJSONValue{Value: val}, nil
-}
-
-// Escape sequences that have special meaning in hcl json
-// such as ${ that come from literals, that shouldn't have
-// real interpolation
-func escapeLiteral(lit string) string {
-	lit = strings.Replace(lit, "${", "$${", -1)
-	lit = strings.Replace(lit, "%{", "%%{", -1)
-	return lit
-}
-
-func (c *converter) convertTemplate(t *hclsyntax.TemplateExpr) (string, error) {
-	if t.IsStringLiteral() {
-		// safe because the value is just the string
-		v, err := t.Value(nil)
-		if err != nil {
-			return "", err
+			m := make(jsonObj)
+			m["key"] = key
+			m["value"] = value
+			props = append(props, m)
 		}
-		return escapeLiteral(v.AsString()), nil
-	}
-	var builder strings.Builder
-	for _, part := range t.Parts {
-		s, err := c.convertStringPart(part)
-		if err != nil {
-			return "", err
-		}
-		builder.WriteString(s)
-	}
-	return builder.String(), nil
-}
-
-func (c *converter) convertStringPart(expr hclsyntax.Expression) (string, error) {
-	switch v := expr.(type) {
-	case *hclsyntax.LiteralValueExpr:
-		// If the key is a bare "null", then we end up with null here,
-		// in this case we should just return the string "null"
-		if v.Val.IsNull() {
-			return "null", nil
-		}
-		s, err := ctyconvert.Convert(v.Val, cty.String)
-		if err != nil {
-			return "", err
-		}
-		return escapeLiteral(s.AsString()), nil
-	case *hclsyntax.TemplateExpr:
-		return c.convertTemplate(v)
-	case *hclsyntax.TemplateWrapExpr:
-		return c.convertStringPart(v.Wrapped)
+		n["props"] = props
+		return n, nil
 	case *hclsyntax.ConditionalExpr:
-		return c.convertTemplateConditional(v)
-	case *hclsyntax.TemplateJoinExpr:
-		return c.convertTemplateFor(v.Tuple.(*hclsyntax.ForExpr))
-	default:
-		// treating as an embedded expression
-		return c.wrapExpr(expr), nil
-	}
-}
-
-func (c *converter) convertKey(keyExpr hclsyntax.Expression) (string, error) {
-	// a key should never have dynamic input
-	if k, isKeyExpr := keyExpr.(*hclsyntax.ObjectConsKeyExpr); isKeyExpr {
-		keyExpr = k.Wrapped
-		if _, isTraversal := keyExpr.(*hclsyntax.ScopeTraversalExpr); isTraversal {
-			return c.rangeSource(keyExpr.Range()), nil
+		n := make(jsonObj)
+		n["$type"] = "conditional"
+		cond, err := c.ConvertExpression(value.Condition)
+		if err != nil {
+			return nil, fmt.Errorf("convert conditional condition: %w", err)
 		}
-	}
-	return c.convertStringPart(keyExpr)
-}
+		n["condition"] = cond
+		trueResult, err := c.ConvertExpression(value.TrueResult)
+		if err != nil {
+			return nil, fmt.Errorf("convert conditional true result: %w", err)
+		}
+		n["ifTrue"] = trueResult
+		falseResult, err := c.ConvertExpression(value.FalseResult)
+		if err != nil {
+			return nil, fmt.Errorf("convert conditional false result: %w", err)
+		}
+		n["ifFalse"] = falseResult
+		return n, nil
+	case *hclsyntax.BinaryOpExpr:
+		n := make(jsonObj)
+		n["$type"] = "binary"
+		n["op"] = strings.TrimSpace(c.rangeSource(hcl.Range{Filename: value.SrcRange.Filename, Start: value.LHS.Range().End, End: value.RHS.Range().Start}))
+		left, err := c.ConvertExpression(value.LHS)
+		if err != nil {
+			return nil, fmt.Errorf("convert binary left: %w", err)
+		}
+		n["left"] = left
+		right, err := c.ConvertExpression(value.RHS)
+		if err != nil {
+			return nil, fmt.Errorf("convert binary right: %w", err)
+		}
+		n["right"] = right
+		return n, nil
+	case *hclsyntax.FunctionCallExpr:
+		n := make(jsonObj)
+		n["$type"] = "function"
+		n["name"] = c.rangeSource(value.NameRange)
+		var args []interface{}
+		for _, arg := range value.Args {
+			convertedArg, err := c.ConvertExpression(arg)
+			if err != nil {
+				return nil, fmt.Errorf("convert function arg: %w", err)
+			}
+			args = append(args, convertedArg)
+		}
+		n["args"] = args
+		return n, nil
+	case *hclsyntax.ForExpr:
+		n := make(jsonObj)
+		n["$type"] = "for"
+		if len(value.KeyVar) > 0 {
+			n["keyVar"] = value.KeyVar
+		} else {
+			n["keyVar"] = nil
+		}
+		n["valVar"] = value.ValVar
 
-func (c *converter) convertTemplateConditional(expr *hclsyntax.ConditionalExpr) (string, error) {
-	var builder strings.Builder
-	builder.WriteString("%{if ")
-	builder.WriteString(c.rangeSource(expr.Condition.Range()))
-	builder.WriteString("}")
-	trueResult, err := c.convertStringPart(expr.TrueResult)
-	if err != nil {
-		return "", nil
-	}
-	builder.WriteString(trueResult)
-	falseResult, err := c.convertStringPart(expr.FalseResult)
-	if len(falseResult) > 0 {
-		builder.WriteString("%{else}")
-		builder.WriteString(falseResult)
-	}
-	builder.WriteString("%{endif}")
+		coll, err := c.ConvertExpression(value.CollExpr)
+		if err != nil {
+			return nil, fmt.Errorf("convert for coll: %w", err)
+		}
+		n["collection"] = coll
 
-	return builder.String(), nil
-}
+		keyExpr, err := c.ConvertExpression(value.KeyExpr)
+		if err != nil {
+			return nil, fmt.Errorf("convert for keyExpr: %w", err)
+		}
+		n["keyExpr"] = keyExpr
 
-func (c *converter) convertTemplateFor(expr *hclsyntax.ForExpr) (string, error) {
-	var builder strings.Builder
-	builder.WriteString("%{for ")
-	if len(expr.KeyVar) > 0 {
-		builder.WriteString(expr.KeyVar)
-		builder.WriteString(", ")
+		valExpr, err := c.ConvertExpression(value.ValExpr)
+		if err != nil {
+			return nil, fmt.Errorf("convert for valExpr: %w", err)
+		}
+		n["valExpr"] = valExpr
+
+		if value.CondExpr != nil {
+			condExpr, err := c.ConvertExpression(value.CondExpr)
+			if err != nil {
+				return nil, fmt.Errorf("convert for condExpr: %w", err)
+			}
+			n["condExpr"] = condExpr
+		} else {
+			n["condExpr"] = nil
+		}
+
+		return n, nil
+	case *hclsyntax.IndexExpr:
+		n := make(jsonObj)
+		n["$type"] = "index"
+		collection, err := c.ConvertExpression(value.Collection)
+		if err != nil {
+			return nil, fmt.Errorf("convert index collection: %w", err)
+		}
+		n["collection"] = collection
+		key, err := c.ConvertExpression(value.Key)
+		if err != nil {
+			return nil, fmt.Errorf("convert index key: %w", err)
+		}
+		n["key"] = key
+		return n, nil
+	case *hclsyntax.ScopeTraversalExpr:
+		n := make(jsonObj)
+		n["$type"] = "scope_traversal"
+		var parts []interface{}
+		for _, part := range value.Traversal {
+			switch p := part.(type) {
+			case hcl.TraverseAttr:
+				parts = append(parts, map[string]interface{}{
+					"type": "attr",
+					"name": p.Name,
+				})
+			case hcl.TraverseIndex:
+				key, err := c.ConvertExpression(&hclsyntax.LiteralValueExpr{Val: p.Key, SrcRange: p.SrcRange})
+				if err != nil {
+					return nil, fmt.Errorf("convert scope traversal index key: %w", err)
+				}
+				parts = append(parts, map[string]interface{}{
+					"type": "index",
+					"key":  key,
+				})
+			case hcl.TraverseRoot:
+				parts = append(parts, map[string]interface{}{
+					"type": "root",
+					"name": p.Name,
+				})
+			default:
+				return nil, fmt.Errorf("unknown scope traversal part type: %T", p)
+			}
+		}
+		n["parts"] = parts
+		return n, nil
+	case *hclsyntax.RelativeTraversalExpr:
+		n := make(jsonObj)
+		n["$type"] = "relative_traversal"
+		var parts []interface{}
+		for _, part := range value.Traversal {
+			switch p := part.(type) {
+			case hcl.TraverseAttr:
+				parts = append(parts, map[string]interface{}{
+					"type": "attr",
+					"name": p.Name,
+				})
+			case hcl.TraverseIndex:
+				key, err := c.ConvertExpression(&hclsyntax.LiteralValueExpr{Val: p.Key, SrcRange: p.SrcRange})
+				if err != nil {
+					return nil, fmt.Errorf("convert relative traversal index key: %w", err)
+				}
+				parts = append(parts, map[string]interface{}{
+					"type": "index",
+					"key":  key,
+				})
+			case hcl.TraverseRoot:
+				parts = append(parts, map[string]interface{}{
+					"type": "root",
+					"name": p.Name,
+				})
+			default:
+				return nil, fmt.Errorf("unknown relative traversal part type: %T", p)
+			}
+		}
+		n["parts"] = parts
+		return n, nil
 	}
-	builder.WriteString(expr.ValVar)
-	builder.WriteString(" in ")
-	builder.WriteString(c.rangeSource(expr.CollExpr.Range()))
-	builder.WriteString("}")
-	templ, err := c.convertStringPart(expr.ValExpr)
-	if err != nil {
-		return "", err
-	}
-	builder.WriteString(templ)
-	builder.WriteString("%{endfor}")
 
-	return builder.String(), nil
-}
-
-func (c *converter) wrapExpr(expr hclsyntax.Expression) string {
-	return "${" + c.rangeSource(expr.Range()) + "}"
+	return nil, fmt.Errorf("unsupported expression type: %T", expr)
 }

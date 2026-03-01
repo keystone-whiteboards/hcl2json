@@ -23,7 +23,6 @@ func main() {
 	var options convert.Options
 	var printVersion bool
 
-	flag.BoolVar(&options.Simplify, "simplify", false, "If true attempt to simply expressions which don't contain any variables or unknown functions")
 	flag.BoolVar(&printVersion, "version", false, "Print the version of hcl2json")
 	flag.BoolVar(&printVersion, "v", false, "Shorthand for -version")
 	flag.Parse()
