@@ -651,6 +651,47 @@ func (c *converter) convertRelativeTraversalExpr(expr *hclsyntax.RelativeTravers
 	}), nil
 }
 
+func (c *converter) convertAnonSymbolExpr(expr *hclsyntax.AnonSymbolExpr) (jsonObj, error) {
+	return c.makeExprNode("anon-symbol", expr, map[string]interface{}{}, func() string {
+		return "*"
+	}), nil
+}
+
+func (c *converter) convertSplatExpr(expr *hclsyntax.SplatExpr) (jsonObj, error) {
+	sourceExpr, err := c.ConvertExpression(expr.Source)
+	if err != nil {
+		return nil, fmt.Errorf("convert splat source: %w", err)
+	}
+
+	eachExpr, err := c.ConvertExpression(expr.Each)
+	if err != nil {
+		return nil, fmt.Errorf("convert splat each: %w", err)
+	}
+
+	itemExpr, err := c.ConvertExpression(expr.Item)
+	if err != nil {
+		return nil, fmt.Errorf("convert splat item: %w", err)
+	}
+
+	marker := strings.TrimSpace(c.rangeSource(expr.MarkerRange))
+
+	return c.makeExprNode("splat", expr, map[string]interface{}{
+		"source": sourceExpr,
+		"each":   eachExpr,
+		"item":   itemExpr,
+	}, func() string {
+		eachSource := sourceFromNode(eachExpr)
+		if eachSource == "*" {
+			return sourceFromNode(sourceExpr) + marker
+		}
+		suffix := eachSource
+		suffix = strings.TrimPrefix(suffix, "[*]")
+		suffix = strings.TrimPrefix(suffix, ".*")
+		suffix = strings.TrimPrefix(suffix, "*")
+		return sourceFromNode(sourceExpr) + marker + suffix
+	}), nil
+}
+
 func (c *converter) convertParenthesesExpr(expr *hclsyntax.ParenthesesExpr) (jsonObj, error) {
 	inner, err := c.ConvertExpression(expr.Expression)
 	if err != nil {
@@ -704,6 +745,10 @@ func (c *converter) ConvertExpression(expr hclsyntax.Expression) (jsonObj, error
 		return c.convertScopeTraversalExpr(value)
 	case *hclsyntax.RelativeTraversalExpr:
 		return c.convertRelativeTraversalExpr(value)
+	case *hclsyntax.AnonSymbolExpr:
+		return c.convertAnonSymbolExpr(value)
+	case *hclsyntax.SplatExpr:
+		return c.convertSplatExpr(value)
 	case *hclsyntax.ParenthesesExpr:
 		return c.convertParenthesesExpr(value)
 	}

@@ -349,6 +349,27 @@ func TestExpressionSourceByNodeType(t *testing.T) {
 		node := convertExpr(t, "(1 + 2)")
 		assertExprNodeSource(t, node, "parentheses", "(1 + 2)")
 	})
+
+	t.Run("splat-full", func(t *testing.T) {
+		node := convertExpr(t, "var.list[*]")
+		assertExprNodeSource(t, node, "splat", "var.list[*]")
+
+		each := asMap(t, node["each"])
+		if each["$type"] != "anon-symbol" {
+			t.Fatalf("expected anon-symbol each node, got %v", each["$type"])
+		}
+		assertExprNodeSource(t, each, "anon-symbol", "*")
+	})
+
+	t.Run("splat-full-with-traversal", func(t *testing.T) {
+		node := convertExpr(t, "var.list[*].id")
+		assertExprNodeSource(t, node, "splat", "var.list[*].id")
+	})
+
+	t.Run("splat-legacy", func(t *testing.T) {
+		node := convertExpr(t, "var.list.*.id")
+		assertExprNodeSource(t, node, "splat", "var.list.*.id")
+	})
 }
 
 func convertExpr(t *testing.T, exprSource string) map[string]interface{} {
