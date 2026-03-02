@@ -43,24 +43,15 @@ func main() {
 		os.Exit(0)
 	}
 
-	buffer := bytes.NewBuffer([]byte{})
 	files := flag.Args()
-	var inputName string
-
-	switch len(files) {
-	case 0:
+	if len(files) == 0 {
 		files = append(files, "-")
-		inputName = "STDIN"
-	case 1:
-		inputName = files[0]
-		if inputName == "-" {
-			inputName = "STDIN"
-		}
-	default:
-		inputName = "COMPOSITE"
 	}
 
-	for _, filename := range files {
+	inputs := make([]convert.InputFile, 0, len(files))
+
+	for _, inputFile := range files {
+		filename := inputFile
 		var stream io.Reader
 		if filename == "-" {
 			stream = os.Stdin
@@ -73,16 +64,20 @@ func main() {
 			defer file.Close()
 			stream = file
 		}
+
+		buffer := bytes.NewBuffer([]byte{})
 		_, err := buffer.ReadFrom(stream)
 		if err != nil {
 			logger.Fatalf("Failed to read from %s: %s\n", filename, err)
 		}
 		buffer.WriteByte('\n') // just in case it doesn't have an ending newline
+
+		inputs = append(inputs, convert.InputFile{Bytes: buffer.Bytes(), Filename: filename})
 	}
 
-	converted, err := convert.Bytes(buffer.Bytes(), inputName, options)
+	converted, err := convert.Files(inputs, options)
 	if err != nil {
-		logger.Fatalf("Failed to convert file: %v", err)
+		logger.Fatalf("Failed to convert files: %v", err)
 	}
 
 	var indented bytes.Buffer

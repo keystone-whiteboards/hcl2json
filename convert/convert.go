@@ -14,20 +14,83 @@ import (
 type Options struct {
 }
 
-// Bytes takes the contents of an HCL file, as bytes, and converts
-// them into a JSON representation of the HCL file.
-func Bytes(bytes []byte, filename string, options Options) ([]byte, error) {
-	file, diags := hclsyntax.ParseConfig(bytes, filename, hcl.Pos{Line: 1, Column: 1})
-	if diags.HasErrors() {
-		return nil, fmt.Errorf("parse config: %v", diags.Errs())
+type InputFile struct {
+	Bytes    []byte
+	Filename string
+}
+
+// Files takes the contents of one or more HCL files, as bytes, and converts
+// them into a single JSON representation. Blocks of the same type are appended,
+// and top-level attributes are merged.
+func Files(files []InputFile, options Options) ([]byte, error) {
+	convertedFiles := make([]jsonObj, 0, len(files))
+	for _, inputFile := range files {
+		file, diags := hclsyntax.ParseConfig(inputFile.Bytes, inputFile.Filename, hcl.Pos{Line: 1, Column: 1})
+		if diags.HasErrors() {
+			return nil, fmt.Errorf("parse config %s: %v", inputFile.Filename, diags.Errs())
+		}
+
+		convertedFile, err := ConvertFile(file, options)
+		if err != nil {
+			return nil, fmt.Errorf("convert file %s: %w", inputFile.Filename, err)
+		}
+
+		convertedFiles = append(convertedFiles, convertedFile)
 	}
 
-	hclBytes, err := File(file, options)
+	merged, err := mergeConvertedFiles(convertedFiles)
 	if err != nil {
-		return nil, fmt.Errorf("convert to HCL: %w", err)
+		return nil, fmt.Errorf("merge converted files: %w", err)
 	}
 
-	return hclBytes, nil
+	jsonBytes, err := json.Marshal(merged)
+	if err != nil {
+		return nil, fmt.Errorf("marshal json: %w", err)
+	}
+
+	return jsonBytes, nil
+}
+
+func mergeConvertedFiles(files []jsonObj) (jsonObj, error) {
+	merged := makeNode("root", map[string]interface{}{
+		"blocks":     make(jsonObj),
+		"attributes": make(jsonObj),
+	})
+
+	mergedBlocks := merged["blocks"].(jsonObj)
+	mergedAttributes := merged["attributes"].(jsonObj)
+
+	for _, convertedFile := range files {
+		blocks, ok := convertedFile["blocks"].(jsonObj)
+		if !ok {
+			return nil, fmt.Errorf("converted file missing blocks")
+		}
+
+		attributes, ok := convertedFile["attributes"].(jsonObj)
+		if !ok {
+			return nil, fmt.Errorf("converted file missing attributes")
+		}
+
+		for blockType, blocksForType := range blocks {
+			typedBlocks, ok := blocksForType.([]interface{})
+			if !ok {
+				return nil, fmt.Errorf("blocks for type %s are not a list", blockType)
+			}
+			if _, exists := mergedBlocks[blockType]; !exists {
+				mergedBlocks[blockType] = []interface{}{}
+			}
+			mergedBlocks[blockType] = append(mergedBlocks[blockType].([]interface{}), typedBlocks...)
+		}
+
+		for attrName, attrValue := range attributes {
+			if _, exists := mergedAttributes[attrName]; exists {
+				return nil, fmt.Errorf("duplicate top-level attribute across files: %s", attrName)
+			}
+			mergedAttributes[attrName] = attrValue
+		}
+	}
+
+	return merged, nil
 }
 
 // File takes an HCL file and converts it to its JSON representation.
@@ -63,7 +126,7 @@ func ConvertFile(file *hcl.File, options Options) (jsonObj, error) {
 		options: options,
 	}
 
-	n := makeNode("file", map[string]interface{}{})
+	n := makeNode("root", map[string]interface{}{})
 	err := c.convertBody(body, n)
 	if err != nil {
 		return nil, fmt.Errorf("convert body: %w", err)
@@ -101,6 +164,13 @@ func makeExprNode(exprType string, expr hclsyntax.Expression, value map[string]i
 	n := make(jsonObj)
 	n["$type"] = exprType
 	n["$range"] = makeRange(expr.Range())
+	v, _ := expr.Value(&evalContext)
+	n["$exprType"] = v.Type().FriendlyName()
+	if v.IsWhollyKnown() {
+		n["$exprValue"] = v.GoString()
+	} else {
+		n["$exprValue"] = nil
+	}
 	for k, v := range value {
 		n[k] = v
 	}
