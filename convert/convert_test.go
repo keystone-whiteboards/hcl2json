@@ -1,341 +1,249 @@
 package convert
 
 import (
-	"bytes"
 	"encoding/json"
 	"strings"
 	"testing"
 )
 
-func TestLabelsWithNestedBlock(t *testing.T) {
-	input := `
+func TestSingleBlockNewFormat(t *testing.T) {
+	root := convertSingle(t, `
+block "label_one" {
+	attribute = "value"
+}`)
+
+	if root["$type"] != "root" {
+		t.Fatalf("expected root type, got %v", root["$type"])
+	}
+
+	blocks := asMap(t, root["blocks"])
+	blockList := asSlice(t, blocks["block"])
+	if len(blockList) != 1 {
+		t.Fatalf("expected 1 block, got %d", len(blockList))
+	}
+
+	block := asMap(t, blockList[0])
+	if block["$type"] != "block" {
+		t.Fatalf("expected block type node, got %v", block["$type"])
+	}
+
+	labels := asSlice(t, block["labels"])
+	if len(labels) != 1 || labels[0] != "label_one" {
+		t.Fatalf("unexpected labels: %#v", labels)
+	}
+
+	attrs := asMap(t, block["attributes"])
+	attr := asMap(t, attrs["attribute"])
+	if attr["$type"] != "literal" {
+		t.Fatalf("expected literal attribute, got %v", attr["$type"])
+	}
+	if attr["value"] != "value" {
+		t.Fatalf("expected literal value 'value', got %v", attr["value"])
+	}
+	assertHasRange(t, attr, "test.hcl")
+	if _, ok := attr["$exprType"]; !ok {
+		t.Fatal("expected $exprType field on expression node")
+	}
+}
+
+func TestNestedBlockAndLabelsNewFormat(t *testing.T) {
+	root := convertSingle(t, `
 block "label_one" "label_two" {
-	nested_block { }
-}`
+	nested_block {}
+}`)
 
-	expected := `{
-	"block": {
-		"label_one": {
-			"label_two": [
-				{
-					"nested_block": [
-						{}
-					]
-				}
-			]
-		}
-	}
-}`
-
-	convertedBytes, err := Bytes([]byte(input), "", Options{})
-	if err != nil {
-		t.Fatal("parse bytes:", err)
+	blocks := asMap(t, root["blocks"])
+	block := asMap(t, asSlice(t, blocks["block"])[0])
+	labels := asSlice(t, block["labels"])
+	if len(labels) != 2 || labels[0] != "label_one" || labels[1] != "label_two" {
+		t.Fatalf("unexpected labels: %#v", labels)
 	}
 
-	compareTest(t, convertedBytes, expected)
-}
-
-func TestSingleBlock(t *testing.T) {
-	input := `
-block "label_one" {
-	attribute = "value"
-}
-`
-
-	expected := `{
-	"block": {
-		"label_one": [
-			{
-				"attribute": "value"
-			}
-		]
-	}
-}`
-
-	convertedBytes, err := Bytes([]byte(input), "", Options{})
-	if err != nil {
-		t.Fatal("parse bytes:", err)
-	}
-
-	compareTest(t, convertedBytes, expected)
-}
-
-func TestMultipleBlocks(t *testing.T) {
-	input := `
-block "label_one" {
-	attribute = "value"
-}
-block "label_one" {
-	attribute = "value_two"
-}
-`
-
-	expected := `{
-	"block": {
-		"label_one": [
-			{
-				"attribute": "value"
-			},
-			{
-				"attribute": "value_two"
-			}
-		]
-	}
-}`
-
-	convertedBytes, err := Bytes([]byte(input), "", Options{})
-	if err != nil {
-		t.Fatal("parse bytes:", err)
-	}
-
-	compareTest(t, convertedBytes, expected)
-}
-
-func TestConversion(t *testing.T) {
-	const input = `
-locals {
-	test3 = 1 + 2
-	test1 = "hello"
-	test2 = 5
-	arr = [1, 2, 3, 4]
-	hyphen-test = 3
-	temp = "${1 + 2} %{if local.test2 < 3}\"4\n\"%{endif}"
-	temp2 = "${"hi"} there"
-		quoted = "\"quoted\""
-		squoted = "'quoted'"
-	x = -10
-	y = -x
-	z = -(1 + 4)
-}
-
-locals {
-	other = {
-		num = local.test2 + 5
-		thing = [for x in local.arr: x * 2]
-		"${local.test3}" = 4
-		3 = 1
-		"local.test1" = 89
-		"a.b.c[\"hi\"][3].*" = 3
-		loop = "This has a for loop: %{for x in local.arr}x,%{endfor}"
-		a.b.c = "True"
+	nested := asMap(t, block["blocks"])
+	nestedList := asSlice(t, nested["nested_block"])
+	if len(nestedList) != 1 {
+		t.Fatalf("expected one nested_block, got %d", len(nestedList))
 	}
 }
 
-locals {
-	heredoc = <<-EOF
-		This is a heredoc template.
-		It references ${local.other.3}
-	EOF
-	simple = "${4 - 2}"
-	cond = test3 > 2 ? 1: 0
-	heredoc2 = <<EOF
-		Another heredoc, that
-		doesn't remove indentation
-		${local.other.3}
-		%{if true ? false : true}"gotcha"\n%{else}4%{endif}
-	EOF
-}
+func TestMultipleBlocksAreNotMerged(t *testing.T) {
+	root := convertSingle(t, `
+block "label_one" { attribute = "value" }
+block "label_one" { attribute = "value_two" }
+`)
 
-data "terraform_remote_state" "remote" {
-	backend = "s3"
+	blocks := asMap(t, root["blocks"])
+	blockList := asSlice(t, blocks["block"])
+	if len(blockList) != 2 {
+		t.Fatalf("expected 2 blocks, got %d", len(blockList))
+	}
 
-	config = {
-		profile = var.profile
-		region  = var.region
-		bucket  = "mybucket"
-		key     = "mykey"
+	first := asMap(t, asMap(t, blockList[0])["attributes"])
+	second := asMap(t, asMap(t, blockList[1])["attributes"])
+
+	if asMap(t, first["attribute"])["value"] != "value" {
+		t.Fatalf("unexpected first block value: %v", asMap(t, first["attribute"])["value"])
+	}
+	if asMap(t, second["attribute"])["value"] != "value_two" {
+		t.Fatalf("unexpected second block value: %v", asMap(t, second["attribute"])["value"])
 	}
 }
 
-variable "profile" {}
+func TestExpressionNodeMetadata(t *testing.T) {
+	root := convertSingle(t, `
+a = 1 + 2
+b = [1, 2, 3]
+c = foo.bar
+`)
 
-variable "region" {
-	default = "us-east-1"
-}
-`
+	attrs := asMap(t, root["attributes"])
 
-	const expected = `{
-	"data": {
-		"terraform_remote_state": {
-			"remote": [
-				{
-					"backend": "s3",
-					"config": {
-						"bucket": "mybucket",
-						"key": "mykey",
-						"profile": "${var.profile}",
-						"region": "${var.region}"
-					}
-				}
-			]
-		}
-	},
-	"locals": [
-		{
-			"arr": [
-				1,
-				2,
-				3,
-				4
-			],
-			"hyphen-test": 3,
-			"quoted": "\"quoted\"",
-			"squoted": "'quoted'",
-			"temp": "${1 + 2} %{if local.test2 \u003c 3}\"4\n\"%{endif}",
-			"temp2": "hi there",
-			"test1": "hello",
-			"test2": 5,
-			"test3": "${1 + 2}",
-			"x": -10,
-			"y": "${-x}",
-			"z": "${-(1 + 4)}"
-		},
-		{
-			"other": {
-				"${local.test3}": 4,
-				"3": 1,
-				"a.b.c": "True",
-				"a.b.c[\"hi\"][3].*": 3,
-				"local.test1": 89,
-				"loop": "This has a for loop: %{for x in local.arr}x,%{endfor}",
-				"num": "${local.test2 + 5}",
-				"thing": "${[for x in local.arr: x * 2]}"
-			}
-		},
-		{
-			"cond": "${test3 \u003e 2 ? 1: 0}",
-			"heredoc": "This is a heredoc template.\nIt references ${local.other.3}\n",
-			"heredoc2": "\t\tAnother heredoc, that\n\t\tdoesn't remove indentation\n\t\t${local.other.3}\n\t\t%{if true ? false : true}\"gotcha\"\\n%{else}4%{endif}\n",
-			"simple": "${4 - 2}"
-		}
-	],
-	"variable": {
-		"profile": [
-			{}
-		],
-		"region": [
-			{
-				"default": "us-east-1"
-			}
-		]
+	a := asMap(t, attrs["a"])
+	if a["$type"] != "binary" {
+		t.Fatalf("expected binary expression for a, got %v", a["$type"])
 	}
-}`
+	assertHasRange(t, a, "test.hcl")
 
-	convertedBytes, err := Bytes([]byte(input), "", Options{})
-	if err != nil {
-		t.Fatal("parse bytes:", err)
+	b := asMap(t, attrs["b"])
+	if b["$type"] != "tuple" {
+		t.Fatalf("expected tuple expression for b, got %v", b["$type"])
 	}
 
-	compareTest(t, convertedBytes, expected)
+	c := asMap(t, attrs["c"])
+	if c["$type"] != "scope-traversal" {
+		t.Fatalf("expected scope-traversal expression for c, got %v", c["$type"])
+	}
+	parts := asSlice(t, c["parts"])
+	if len(parts) < 2 {
+		t.Fatalf("expected traversal parts, got %#v", parts)
+	}
 }
 
-func TestSimplify(t *testing.T) {
-	input := `locals {
-		a = split("-", "xyx-abc-def")
-		x = 1 + 2
-		y = pow(2,3)
-		t = "x=${4+abs(2-3)*parseint("02",16)}"
-		j = jsonencode({
-			a = "a"
-			b = 5
-		})
-		with_vars = x + 1
-	}`
+func TestFilesMergeCombinedOutput(t *testing.T) {
+	root := convertMulti(t,
+		InputFile{Bytes: []byte(`
+block "one" {
+	x = 1
+}
+a = 1
+`), Filename: "one.hcl"},
+		InputFile{Bytes: []byte(`
+block "two" {
+	y = 2
+}
+b = 2
+`), Filename: "two.hcl"},
+	)
 
-	expected := `{
-	"locals": [
-		{
-			"a": [
-				"xyx",
-				"abc",
-				"def"
-			],
-			"j": "{\"a\":\"a\",\"b\":5}",
-			"t": "x=6",
-			"with_vars": "${x + 1}",
-			"x": 3,
-			"y": 8
-		}
-	]
-}`
-
-	convertedBytes, err := Bytes([]byte(input), "", Options{Simplify: true})
-	if err != nil {
-		t.Fatal("parse bytes:", err)
+	if root["$type"] != "root" {
+		t.Fatalf("expected root type, got %v", root["$type"])
 	}
 
-	compareTest(t, convertedBytes, expected)
+	attrs := asMap(t, root["attributes"])
+	if _, ok := attrs["a"]; !ok {
+		t.Fatal("expected attribute a from first file")
+	}
+	if _, ok := attrs["b"]; !ok {
+		t.Fatal("expected attribute b from second file")
+	}
+
+	blocks := asMap(t, root["blocks"])
+	blockList := asSlice(t, blocks["block"])
+	if len(blockList) != 2 {
+		t.Fatalf("expected 2 merged block entries, got %d", len(blockList))
+	}
 }
 
-func TestEndOfFileExpr(t *testing.T) {
-	input := `inputs = merge(
-		{},
-		foo().inputs
-	)`
-	expected := `{
-	"inputs": "${merge(\n\t\t{},\n\t\tfoo().inputs\n\t)}"
-}`
-
-	convertedBytes, err := Bytes([]byte(input), "", Options{})
-	if err != nil {
-		t.Fatal("parse bytes:", err)
-	}
-
-	compareTest(t, convertedBytes, expected)
-}
-
-func TestBlocksWithAndWithoutLabels(t *testing.T) {
-	input := `
-	foo "baz" {
-		key = 7
-		foo = "bar"
-	}
-
-	foo {
-		key = 7
-	}`
-
-	_, err := Bytes([]byte(input), "", Options{})
+func TestFilesDuplicateTopLevelAttributeError(t *testing.T) {
+	_, err := Files([]InputFile{
+		{Bytes: []byte(`a = 1`), Filename: "one.hcl"},
+		{Bytes: []byte(`a = 2`), Filename: "two.hcl"},
+	}, Options{})
 	if err == nil {
-		t.Fatal("invalid HCL should have returned an error:", err)
+		t.Fatal("expected duplicate attribute error")
 	}
-
-	if !strings.Contains(err.Error(), `invalid HCL detected for "foo" block, cannot have blocks with and without labels`) {
-		t.Fatalf("given error %q did not match expected error", err.Error())
+	if !strings.Contains(err.Error(), "duplicate top-level attribute across files: a") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
-// https://github.com/tmccombs/hcl2json/issues/96
-func TestTemplateEscapes(t *testing.T) {
-	input := `
-		v = "$${one}"
-		x = "${var.y} $${oh}"
-		y = "%{ if true }%%{hi}%{ endif }"
-		z = "%%{oh"
-	`
+func TestTemplateEscapesNewFormat(t *testing.T) {
+	root := convertSingle(t, `
+v = "$${one}"
+x = "${var.y} $${oh}"
+y = "%{ if true }%%{hi}%{ endif }"
+z = "%%{oh"
+`)
 
-	expected := `{
-	"v": "$${one}",
-	"x": "${var.y} $${oh}",
-	"y": "%{if true}%%{hi}%{endif}",
-	"z": "%%{oh"
-}`
+	attrs := asMap(t, root["attributes"])
+	for _, key := range []string{"v", "z"} {
+		node := asMap(t, attrs[key])
+		if node["$type"] != "literal" {
+			t.Fatalf("expected %s to be literal node, got %v", key, node["$type"])
+		}
+		assertHasRange(t, node, "test.hcl")
+	}
 
-	converted, err := Bytes([]byte(input), "", Options{})
+	for _, key := range []string{"x", "y"} {
+		node := asMap(t, attrs[key])
+		if node["$type"] != "template" {
+			t.Fatalf("expected %s to be template node, got %v", key, node["$type"])
+		}
+		assertHasRange(t, node, "test.hcl")
+	}
+}
+
+func convertSingle(t *testing.T, input string) map[string]interface{} {
+	t.Helper()
+	return convertMulti(t, InputFile{Bytes: []byte(input), Filename: "test.hcl"})
+}
+
+func convertMulti(t *testing.T, files ...InputFile) map[string]interface{} {
+	t.Helper()
+	converted, err := Files(files, Options{})
 	if err != nil {
-		t.Fatal("Failed to parse: ", err)
+		t.Fatalf("convert files: %v", err)
 	}
-	compareTest(t, converted, expected)
+
+	var root map[string]interface{}
+	if err := json.Unmarshal(converted, &root); err != nil {
+		t.Fatalf("unmarshal converted output: %v", err)
+	}
+	return root
 }
 
-func compareTest(t *testing.T, input []byte, expected string) {
-	var indented bytes.Buffer
-	if err := json.Indent(&indented, input, "", "\t"); err != nil {
-		t.Fatal("indent:", err)
+func assertHasRange(t *testing.T, node map[string]interface{}, expectedFilename string) {
+	t.Helper()
+	rangeValue, ok := node["$range"]
+	if !ok {
+		t.Fatalf("missing $range in node: %#v", node)
 	}
+	rangeMap := asMap(t, rangeValue)
+	if rangeMap["filename"] != expectedFilename {
+		t.Fatalf("expected range filename %q, got %v", expectedFilename, rangeMap["filename"])
+	}
+	if _, ok := rangeMap["start"]; !ok {
+		t.Fatalf("missing range start: %#v", rangeMap)
+	}
+	if _, ok := rangeMap["end"]; !ok {
+		t.Fatalf("missing range end: %#v", rangeMap)
+	}
+}
 
-	actual := indented.String()
-	if actual != expected {
-		t.Errorf("Expected:\n%s\n\nGot:\n%s", expected, actual)
+func asMap(t *testing.T, value interface{}) map[string]interface{} {
+	t.Helper()
+	m, ok := value.(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected map[string]interface{}, got %T (%#v)", value, value)
 	}
+	return m
+}
+
+func asSlice(t *testing.T, value interface{}) []interface{} {
+	t.Helper()
+	s, ok := value.([]interface{})
+	if !ok {
+		t.Fatalf("expected []interface{}, got %T (%#v)", value, value)
+	}
+	return s
 }
