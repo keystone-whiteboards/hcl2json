@@ -3,6 +3,7 @@ package convert
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	hcl "github.com/hashicorp/hcl/v2"
@@ -160,7 +161,7 @@ func makeRange(r hcl.Range) map[string]interface{} {
 	return n
 }
 
-func makeExprNode(exprType string, expr hclsyntax.Expression, value map[string]interface{}) jsonObj {
+func (c *converter) makeExprNode(exprType string, expr hclsyntax.Expression, value map[string]interface{}, sourceBuilder func() string) jsonObj {
 	n := make(jsonObj)
 	n["$type"] = exprType
 	n["$range"] = makeRange(expr.Range())
@@ -171,10 +172,69 @@ func makeExprNode(exprType string, expr hclsyntax.Expression, value map[string]i
 	} else {
 		n["$exprValue"] = nil
 	}
+	if sourceBuilder != nil {
+		n["$source"] = sourceBuilder()
+	}
 	for k, v := range value {
 		n[k] = v
 	}
 	return n
+}
+
+func sourceFromNode(node jsonObj) string {
+	source, _ := node["$source"].(string)
+	return source
+}
+
+func (c *converter) literalSource(v cty.Value) string {
+	if !v.IsKnown() {
+		return "null"
+	}
+
+	if v.IsNull() {
+		return "null"
+	}
+
+	if v.Type() == cty.String {
+		return strconv.Quote(v.AsString())
+	}
+
+	if v.Type() == cty.Bool {
+		if v.True() {
+			return "true"
+		}
+		return "false"
+	}
+
+	if v.Type() == cty.Number {
+		return v.AsBigFloat().Text('g', -1)
+	}
+
+	b, err := json.Marshal(ctyjson.SimpleJSONValue{Value: v})
+	if err != nil {
+		return v.GoString()
+	}
+
+	return string(b)
+}
+
+func (c *converter) traversalPartSource(part hcl.Traverser, first bool) string {
+	switch p := part.(type) {
+	case hcl.TraverseRoot:
+		if first {
+			return p.Name
+		}
+		return "." + p.Name
+	case hcl.TraverseAttr:
+		if first {
+			return p.Name
+		}
+		return "." + p.Name
+	case hcl.TraverseIndex:
+		return "[" + c.literalSource(p.Key) + "]"
+	default:
+		return ""
+	}
 }
 
 func (c *converter) rangeSource(r hcl.Range) string {
@@ -231,8 +291,10 @@ func (c *converter) convertBlock(block *hclsyntax.Block, blocks jsonObj) error {
 }
 
 func (c *converter) convertLiteralValueExpr(expr *hclsyntax.LiteralValueExpr) (jsonObj, error) {
-	return makeExprNode("literal", expr, map[string]interface{}{
+	return c.makeExprNode("literal", expr, map[string]interface{}{
 		"value": ctyjson.SimpleJSONValue{Value: expr.Val},
+	}, func() string {
+		return c.literalSource(expr.Val)
 	}), nil
 }
 
@@ -246,17 +308,28 @@ func (c *converter) convertTupleConsExpr(expr *hclsyntax.TupleConsExpr) (jsonObj
 		items = append(items, elem)
 	}
 
-	return makeExprNode("tuple", expr, map[string]interface{}{
+	itemSources := make([]string, 0, len(items))
+	for _, item := range items {
+		itemSources = append(itemSources, sourceFromNode(item))
+	}
+
+	return c.makeExprNode("tuple", expr, map[string]interface{}{
 		"items": items,
+	}, func() string {
+		return "[" + strings.Join(itemSources, ", ") + "]"
 	}), nil
 }
 
 func (c *converter) convertObjectConsExpr(expr *hclsyntax.ObjectConsExpr) (jsonObj, error) {
 	var props []jsonObj
+	var propSources []string
 	for _, item := range expr.Items {
 		keyExpr := item.KeyExpr.(*hclsyntax.ObjectConsKeyExpr)
 		wrappedExpr := keyExpr.Wrapped
+
+		keySource := ""
 		if _, isTraversal := wrappedExpr.(*hclsyntax.ScopeTraversalExpr); isTraversal && !keyExpr.ForceNonLiteral {
+			keySource = strings.TrimSpace(c.rangeSource(wrappedExpr.Range()))
 			wrappedExpr = &hclsyntax.LiteralValueExpr{Val: cty.StringVal(c.rangeSource(wrappedExpr.Range())), SrcRange: wrappedExpr.Range()}
 		}
 
@@ -274,10 +347,17 @@ func (c *converter) convertObjectConsExpr(expr *hclsyntax.ObjectConsExpr) (jsonO
 			"key":   key,
 			"value": value,
 		})
+
+		if keySource == "" {
+			keySource = sourceFromNode(key)
+		}
+		propSources = append(propSources, keySource+" = "+sourceFromNode(value))
 	}
 
-	return makeExprNode("object", expr, map[string]interface{}{
+	return c.makeExprNode("object", expr, map[string]interface{}{
 		"props": props,
+	}, func() string {
+		return "{" + strings.Join(propSources, ", ") + "}"
 	}), nil
 }
 
@@ -286,10 +366,13 @@ func (c *converter) convertUnaryOpExpr(expr *hclsyntax.UnaryOpExpr) (jsonObj, er
 	if err != nil {
 		return nil, fmt.Errorf("convert unary arg: %w", err)
 	}
+	op := strings.TrimSpace(c.rangeSource(expr.SymbolRange))
 
-	return makeExprNode("unary", expr, map[string]interface{}{
+	return c.makeExprNode("unary", expr, map[string]interface{}{
 		"op":  c.rangeSource(expr.SymbolRange),
 		"arg": arg,
+	}, func() string {
+		return op + sourceFromNode(arg)
 	}), nil
 }
 
@@ -303,27 +386,35 @@ func (c *converter) convertBinaryOpExpr(expr *hclsyntax.BinaryOpExpr) (jsonObj, 
 	if err != nil {
 		return nil, fmt.Errorf("convert binary right: %w", err)
 	}
+	op := strings.TrimSpace(c.rangeSource(hcl.Range{Filename: expr.SrcRange.Filename, Start: expr.LHS.Range().End, End: expr.RHS.Range().Start}))
 
-	return makeExprNode("binary", expr, map[string]interface{}{
-		"op":    strings.TrimSpace(c.rangeSource(hcl.Range{Filename: expr.SrcRange.Filename, Start: expr.LHS.Range().End, End: expr.RHS.Range().Start})),
+	return c.makeExprNode("binary", expr, map[string]interface{}{
+		"op":    op,
 		"left":  left,
 		"right": right,
+	}, func() string {
+		return sourceFromNode(left) + " " + op + " " + sourceFromNode(right)
 	}), nil
 }
 
 func (c *converter) convertFunctionCallExpr(expr *hclsyntax.FunctionCallExpr) (jsonObj, error) {
 	var args []interface{}
+	var argSources []string
 	for _, arg := range expr.Args {
 		convertedArg, err := c.ConvertExpression(arg)
 		if err != nil {
 			return nil, fmt.Errorf("convert function arg: %w", err)
 		}
 		args = append(args, convertedArg)
+		argSources = append(argSources, sourceFromNode(convertedArg))
 	}
+	name := c.rangeSource(expr.NameRange)
 
-	return makeExprNode("function", expr, map[string]interface{}{
-		"name": c.rangeSource(expr.NameRange),
+	return c.makeExprNode("function", expr, map[string]interface{}{
+		"name": name,
 		"args": args,
+	}, func() string {
+		return name + "(" + strings.Join(argSources, ", ") + ")"
 	}), nil
 }
 
@@ -345,8 +436,10 @@ func (c *converter) convertTemplateExpr(expr *hclsyntax.TemplateExpr) (jsonObj, 
 		parts = append(parts, s)
 	}
 
-	return makeExprNode("template", expr, map[string]interface{}{
+	return c.makeExprNode("template", expr, map[string]interface{}{
 		"parts": parts,
+	}, func() string {
+		return strings.TrimSpace(c.rangeSource(expr.Range()))
 	}), nil
 }
 
@@ -360,8 +453,10 @@ func (c *converter) convertTemplateJoinExpr(expr *hclsyntax.TemplateJoinExpr) (j
 		return nil, fmt.Errorf("convert template join tuple: %w", err)
 	}
 
-	return makeExprNode("template-join", expr, map[string]interface{}{
+	return c.makeExprNode("template-join", expr, map[string]interface{}{
 		"expr": convertedExpr,
+	}, func() string {
+		return strings.TrimSpace(c.rangeSource(expr.Range()))
 	}), nil
 }
 
@@ -381,10 +476,12 @@ func (c *converter) convertConditionalExpr(expr *hclsyntax.ConditionalExpr) (jso
 		return nil, fmt.Errorf("convert conditional false result: %w", err)
 	}
 
-	return makeExprNode("conditional", expr, map[string]interface{}{
+	return c.makeExprNode("conditional", expr, map[string]interface{}{
 		"condition": cond,
 		"ifTrue":    trueResult,
 		"ifFalse":   falseResult,
+	}, func() string {
+		return sourceFromNode(cond) + " ? " + sourceFromNode(trueResult) + " : " + sourceFromNode(falseResult)
 	}), nil
 }
 
@@ -431,7 +528,38 @@ func (c *converter) convertForExpr(expr *hclsyntax.ForExpr) (jsonObj, error) {
 		fields["condExpr"] = nil
 	}
 
-	return makeExprNode("for", expr, fields), nil
+	return c.makeExprNode("for", expr, fields, func() string {
+		var out strings.Builder
+		if expr.KeyExpr == nil {
+			out.WriteString("[")
+		} else {
+			out.WriteString("{")
+		}
+		out.WriteString("for ")
+		if len(expr.KeyVar) > 0 {
+			out.WriteString(expr.KeyVar)
+			out.WriteString(", ")
+		}
+		out.WriteString(expr.ValVar)
+		out.WriteString(" in ")
+		out.WriteString(sourceFromNode(coll))
+		out.WriteString(" : ")
+		if fields["keyExpr"] != nil {
+			out.WriteString(sourceFromNode(fields["keyExpr"].(jsonObj)))
+			out.WriteString(" => ")
+		}
+		out.WriteString(sourceFromNode(valExpr))
+		if fields["condExpr"] != nil {
+			out.WriteString(" if ")
+			out.WriteString(sourceFromNode(fields["condExpr"].(jsonObj)))
+		}
+		if expr.KeyExpr == nil {
+			out.WriteString("]")
+		} else {
+			out.WriteString("}")
+		}
+		return out.String()
+	}), nil
 }
 
 func (c *converter) convertIndexExpr(expr *hclsyntax.IndexExpr) (jsonObj, error) {
@@ -445,9 +573,11 @@ func (c *converter) convertIndexExpr(expr *hclsyntax.IndexExpr) (jsonObj, error)
 		return nil, fmt.Errorf("convert index key: %w", err)
 	}
 
-	return makeExprNode("index", expr, map[string]interface{}{
+	return c.makeExprNode("index", expr, map[string]interface{}{
 		"collection": collection,
 		"key":        key,
+	}, func() string {
+		return sourceFromNode(collection) + "[" + sourceFromNode(key) + "]"
 	}), nil
 }
 
@@ -488,8 +618,14 @@ func (c *converter) convertScopeTraversalExpr(expr *hclsyntax.ScopeTraversalExpr
 		return nil, err
 	}
 
-	return makeExprNode("scope-traversal", expr, map[string]interface{}{
+	return c.makeExprNode("scope-traversal", expr, map[string]interface{}{
 		"parts": parts,
+	}, func() string {
+		var out strings.Builder
+		for i, part := range expr.Traversal {
+			out.WriteString(c.traversalPartSource(part, i == 0))
+		}
+		return out.String()
 	}), nil
 }
 
@@ -498,9 +634,33 @@ func (c *converter) convertRelativeTraversalExpr(expr *hclsyntax.RelativeTravers
 	if err != nil {
 		return nil, err
 	}
+	sourceExpr, err := c.ConvertExpression(expr.Source)
+	if err != nil {
+		return nil, fmt.Errorf("convert relative traversal source: %w", err)
+	}
 
-	return makeExprNode("relative-traversal", expr, map[string]interface{}{
+	return c.makeExprNode("relative-traversal", expr, map[string]interface{}{
 		"parts": parts,
+	}, func() string {
+		var out strings.Builder
+		out.WriteString(sourceFromNode(sourceExpr))
+		for _, part := range expr.Traversal {
+			out.WriteString(c.traversalPartSource(part, false))
+		}
+		return out.String()
+	}), nil
+}
+
+func (c *converter) convertParenthesesExpr(expr *hclsyntax.ParenthesesExpr) (jsonObj, error) {
+	inner, err := c.ConvertExpression(expr.Expression)
+	if err != nil {
+		return nil, fmt.Errorf("convert parentheses expr: %w", err)
+	}
+
+	return c.makeExprNode("parentheses", expr, map[string]interface{}{
+		"expr": inner,
+	}, func() string {
+		return "(" + sourceFromNode(inner) + ")"
 	}), nil
 }
 
@@ -544,6 +704,8 @@ func (c *converter) ConvertExpression(expr hclsyntax.Expression) (jsonObj, error
 		return c.convertScopeTraversalExpr(value)
 	case *hclsyntax.RelativeTraversalExpr:
 		return c.convertRelativeTraversalExpr(value)
+	case *hclsyntax.ParenthesesExpr:
+		return c.convertParenthesesExpr(value)
 	}
 
 	return nil, fmt.Errorf("unsupported expression type: %T", expr)

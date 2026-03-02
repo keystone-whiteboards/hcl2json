@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	hcl "github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 )
 
 func TestSingleBlockNewFormat(t *testing.T) {
@@ -246,4 +249,138 @@ func asSlice(t *testing.T, value interface{}) []interface{} {
 		t.Fatalf("expected []interface{}, got %T (%#v)", value, value)
 	}
 	return s
+}
+
+func TestExpressionSourceByNodeType(t *testing.T) {
+	t.Run("literal", func(t *testing.T) {
+		node := convertExpr(t, "1")
+		assertExprNodeSource(t, node, "literal", "1")
+	})
+
+	t.Run("tuple", func(t *testing.T) {
+		node := convertExpr(t, "[1, 2]")
+		assertExprNodeSource(t, node, "tuple", "[1, 2]")
+	})
+
+	t.Run("object", func(t *testing.T) {
+		node := convertExpr(t, "{ a = 1 }")
+		assertExprNodeSource(t, node, "object", "{a = 1}")
+	})
+
+	t.Run("unary", func(t *testing.T) {
+		node := convertExpr(t, "-1")
+		assertExprNodeSource(t, node, "unary", "-1")
+	})
+
+	t.Run("binary", func(t *testing.T) {
+		node := convertExpr(t, "1 + 1")
+		assertExprNodeSource(t, node, "binary", "1 + 1")
+	})
+
+	t.Run("function", func(t *testing.T) {
+		node := convertExpr(t, "max(1, 2)")
+		assertExprNodeSource(t, node, "function", "max(1, 2)")
+	})
+
+	t.Run("template", func(t *testing.T) {
+		node := convertExpr(t, `"hello ${1}"`)
+		assertExprNodeSource(t, node, "template", `"hello ${1}"`)
+	})
+
+	t.Run("template-join", func(t *testing.T) {
+		node := convertExpr(t, `"%{for x in [1, 2]}${x}%{endfor}"`)
+		assertExprNodeSource(t, node, "template", `"%{for x in [1, 2]}${x}%{endfor}"`)
+
+		parts := asSlice(t, node["parts"])
+		if len(parts) == 0 {
+			t.Fatal("expected template parts")
+		}
+
+		join := asMap(t, parts[0])
+		assertExprNodeSource(t, join, "template-join", "%{for x in [1, 2]}${x}%{endfor}")
+	})
+
+	t.Run("conditional", func(t *testing.T) {
+		node := convertExpr(t, "true ? 1 : 0")
+		assertExprNodeSource(t, node, "conditional", "true ? 1 : 0")
+	})
+
+	t.Run("for", func(t *testing.T) {
+		node := convertExpr(t, "[for x in [1, 2] : x]")
+		assertExprNodeSource(t, node, "for", "[for x in [1, 2] : x]")
+	})
+
+	t.Run("for-source-tuple-no-condition", func(t *testing.T) {
+		node := convertExpr(t, "[for x in [1, 2] : x]")
+		assertExprNodeSource(t, node, "for", "[for x in [1, 2] : x]")
+	})
+
+	t.Run("for-source-tuple-with-condition", func(t *testing.T) {
+		node := convertExpr(t, "[for x in [1, 2] : x if x > 1]")
+		assertExprNodeSource(t, node, "for", "[for x in [1, 2] : x if x > 1]")
+	})
+
+	t.Run("for-source-object-no-condition", func(t *testing.T) {
+		node := convertExpr(t, "{for k, v in {a = 1, b = 2} : k => v}")
+		assertExprNodeSource(t, node, "for", "{for k, v in {a = 1, b = 2} : k => v}")
+	})
+
+	t.Run("for-source-object-with-condition", func(t *testing.T) {
+		node := convertExpr(t, "{for k, v in {a = 1, b = 2} : k => v if v > 1}")
+		assertExprNodeSource(t, node, "for", "{for k, v in {a = 1, b = 2} : k => v if v > 1}")
+	})
+
+	t.Run("index", func(t *testing.T) {
+		node := convertExpr(t, "var.list[local.i]")
+		assertExprNodeSource(t, node, "index", "var.list[local.i]")
+	})
+
+	t.Run("scope-traversal", func(t *testing.T) {
+		node := convertExpr(t, "var.foo")
+		assertExprNodeSource(t, node, "scope-traversal", "var.foo")
+	})
+
+	t.Run("relative-traversal", func(t *testing.T) {
+		node := convertExpr(t, "(var.foo).bar")
+		assertExprNodeSource(t, node, "relative-traversal", "(var.foo).bar")
+	})
+
+	t.Run("parentheses", func(t *testing.T) {
+		node := convertExpr(t, "(1 + 2)")
+		assertExprNodeSource(t, node, "parentheses", "(1 + 2)")
+	})
+}
+
+func convertExpr(t *testing.T, exprSource string) map[string]interface{} {
+	t.Helper()
+
+	expr, diags := hclsyntax.ParseExpression([]byte(exprSource), "expr.hcl", hcl.Pos{Line: 1, Column: 1})
+	if diags.HasErrors() {
+		t.Fatalf("parse expression %q: %v", exprSource, diags.Errs())
+	}
+
+	c := converter{bytes: []byte(exprSource), options: Options{}}
+	node, err := c.ConvertExpression(expr)
+	if err != nil {
+		t.Fatalf("convert expression %q: %v", exprSource, err)
+	}
+
+	return node
+}
+
+func assertExprNodeSource(t *testing.T, node map[string]interface{}, expectedType, expectedSource string) {
+	t.Helper()
+
+	if node["$type"] != expectedType {
+		t.Fatalf("expected node type %q, got %v", expectedType, node["$type"])
+	}
+
+	source, ok := node["$source"]
+	if !ok {
+		t.Fatalf("expected $source on %q node", expectedType)
+	}
+
+	if source != expectedSource {
+		t.Fatalf("expected $source %q, got %v", expectedSource, source)
+	}
 }
