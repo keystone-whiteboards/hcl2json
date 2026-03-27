@@ -166,11 +166,14 @@ func (c *converter) makeExprNode(exprType string, expr hclsyntax.Expression, val
 	n["$type"] = exprType
 	n["$range"] = makeRange(expr.Range())
 	v, _ := expr.Value(&evalContext)
-	n["$exprType"] = v.Type().FriendlyName()
+	e := make(jsonObj)
+	n["$expr"] = e
+	e["type"] = v.Type().FriendlyName()
+	e["known"] = v.IsWhollyKnown()
 	if v.IsWhollyKnown() {
-		n["$exprValue"] = v.GoString()
+		e["value"] = ctyjson.SimpleJSONValue{Value: v}
 	} else {
-		n["$exprValue"] = nil
+		e["value"] = nil
 	}
 	if sourceBuilder != nil {
 		n["$source"] = sourceBuilder()
