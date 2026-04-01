@@ -124,18 +124,18 @@ c = foo.bar
 
 func TestFilesMergeCombinedOutput(t *testing.T) {
 	root := convertMulti(t,
-		InputFile{Bytes: []byte(`
+		InputFile{Content: `
 block "one" {
 	x = 1
 }
 a = 1
-`), Filename: "one.hcl"},
-		InputFile{Bytes: []byte(`
+`, Filename: "one.hcl"},
+		InputFile{Content: `
 block "two" {
 	y = 2
 }
 b = 2
-`), Filename: "two.hcl"},
+`, Filename: "two.hcl"},
 	)
 
 	if root["$type"] != "root" {
@@ -159,8 +159,8 @@ b = 2
 
 func TestFilesDuplicateTopLevelAttributeError(t *testing.T) {
 	_, err := Files([]InputFile{
-		{Bytes: []byte(`a = 1`), Filename: "one.hcl"},
-		{Bytes: []byte(`a = 2`), Filename: "two.hcl"},
+		{Content: `a = 1`, Filename: "one.hcl"},
+		{Content: `a = 2`, Filename: "two.hcl"},
 	}, Options{})
 	if err == nil {
 		t.Fatal("expected duplicate attribute error")
@@ -198,7 +198,7 @@ z = "%%{oh"
 
 func convertSingle(t *testing.T, input string) map[string]interface{} {
 	t.Helper()
-	return convertMulti(t, InputFile{Bytes: []byte(input), Filename: "test.hcl"})
+	return convertMulti(t, InputFile{Content: input, Filename: "test.hcl"})
 }
 
 func convertMulti(t *testing.T, files ...InputFile) map[string]interface{} {

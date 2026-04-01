@@ -16,8 +16,8 @@ type Options struct {
 }
 
 type InputFile struct {
-	Bytes    []byte
 	Filename string
+	Content string
 }
 
 // Files takes the contents of one or more HCL files, as bytes, and converts
@@ -26,7 +26,7 @@ type InputFile struct {
 func Files(files []InputFile, options Options) ([]byte, error) {
 	convertedFiles := make([]jsonObj, 0, len(files))
 	for _, inputFile := range files {
-		file, diags := hclsyntax.ParseConfig(inputFile.Bytes, inputFile.Filename, hcl.Pos{Line: 1, Column: 1})
+		file, diags := hclsyntax.ParseConfig([]byte(inputFile.Content), inputFile.Filename, hcl.Pos{Line: 1, Column: 1})
 		if diags.HasErrors() {
 			return nil, fmt.Errorf("parse config %s: %v", inputFile.Filename, diags.Errs())
 		}

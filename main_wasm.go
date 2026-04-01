@@ -18,40 +18,27 @@ import (
 // It returns a JSON string of the merged HCL→JSON output, or throws on error.
 func hcl2jsonConvert(this js.Value, args []js.Value) any {
 	if len(args) < 1 {
-		return map[string]any{"error": "hcl2jsonConvert requires one argument (JSON string of files)"}
+		return map[string]any{"success": false, "error": "hcl2jsonConvert requires one argument (JSON string of files)"}
 	}
 
 	inputJSON := args[0].String()
 
-	type fileInput struct {
-		Filename string `json:"filename"`
-		Content  string `json:"content"`
-	}
-
-	var files []fileInput
+	var files []convert.InputFile
 	if err := json.Unmarshal([]byte(inputJSON), &files); err != nil {
-		return map[string]any{"error": "failed to parse input JSON: " + err.Error()}
+		return map[string]any{"success": false, "error": "failed to parse input JSON: " + err.Error()}
 	}
 
-	inputs := make([]convert.InputFile, 0, len(files))
-	for _, f := range files {
-		inputs = append(inputs, convert.InputFile{
-			Filename: f.Filename,
-			Bytes:    []byte(f.Content),
-		})
-	}
-
-	converted, err := convert.Files(inputs, convert.Options{})
+	converted, err := convert.Files(files, convert.Options{})
 	if err != nil {
-		return map[string]any{"error": "hcl2json conversion failed: " + err.Error()}
+		return map[string]any{"success": false, "error": "hcl2json conversion failed: " + err.Error()}
 	}
 
 	var indented bytes.Buffer
 	if err := json.Indent(&indented, converted, "", "    "); err != nil {
-		return map[string]any{"error": "failed to indent JSON: " + err.Error()}
+		return map[string]any{"success": false, "error": "failed to indent JSON: " + err.Error()}
 	}
 
-	return indented.String()
+	return map[string]any{"success": true, "data": indented.String()}
 }
 
 func main() {

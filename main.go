@@ -74,7 +74,7 @@ func main() {
 		}
 		buffer.WriteByte('\n') // just in case it doesn't have an ending newline
 
-		inputs = append(inputs, convert.InputFile{Bytes: buffer.Bytes(), Filename: filename})
+		inputs = append(inputs, convert.InputFile{Content: buffer.String(), Filename: filename})
 	}
 
 	converted, err := convert.Files(inputs, options)
